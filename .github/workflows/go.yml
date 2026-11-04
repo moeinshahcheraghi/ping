@@ -34,7 +34,7 @@ jobs:
             sysctl -w net.ipv4.icmp_echo_ignore_all=1
             PINGTUNNEL_E2E_REQUIRE_REAL_ICMP=1 /tmp/pingtunnel-echo.test -test.run "^TestE2E_(EchoMode|EchoModeTwoClients|TCP_ForwardEcho|UDP_ForwardProxy|SOCKS5_ForwardProxy)$" -test.v -test.timeout=3m
           '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pingtunnel-echo-linux-amd64
           path: pingtunnel-echo
