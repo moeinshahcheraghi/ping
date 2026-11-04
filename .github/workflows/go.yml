@@ -1,0 +1,40 @@
+name: Go
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Unit tests
+        run: go test ./... -skip '^TestE2E' -count=1 -timeout=5m
+      - name: Echo mode and compatibility race tests
+        run: go test -race ./... -run 'TestEchoMode|TestLoadConfigEchoMode|TestSendICMPEchoMarshalEquivalence|TestWireCompatWithOldVersion' -count=1 -timeout=3m
+      - name: Build
+        run: CGO_ENABLED=0 go build -mod=readonly -trimpath -o pingtunnel-echo ./cmd
+      - name: Build integration tests
+        run: go test -c -o /tmp/pingtunnel-echo.test .
+      - name: Real ICMP integration tests in a private namespace
+        run: |
+          sudo unshare --net bash -c '
+            set -e
+            ip link set lo up
+            sysctl -w net.ipv4.icmp_echo_ignore_all=1
+            PINGTUNNEL_E2E_REQUIRE_REAL_ICMP=1 /tmp/pingtunnel-echo.test -test.run "^TestE2E_(EchoMode|EchoModeTwoClients|TCP_ForwardEcho|UDP_ForwardProxy|SOCKS5_ForwardProxy)$" -test.v -test.timeout=3m
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingtunnel-echo-linux-amd64
+          path: pingtunnel-echo

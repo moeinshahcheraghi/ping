@@ -1,0 +1,120 @@
+# Authenticated bidirectional Echo mode
+
+Enable `echo_mode: true` in the JSON config, or `-echo-mode`, on both upgraded
+peers. The default is false and retains the existing v3 protocol. A one-sided
+upgrade cannot communicate: the encrypted envelopes use a separate authenticated
+domain, with no automatic fallback. All peers still need the same strong password.
+
+## Behavior
+
+* Client and server carry encrypted application frames only in type-8, code-0
+  Echo Requests. Each endpoint advances its own sequence counter.
+* After validating the ICMP checksum, AEAD, message magic, auth code and direction,
+  the receiver returns a type-0, code-0 Echo Reply with the exact request payload,
+  identifier and sequence. Replies are acknowledgements, never new application data.
+* The client session identifier is authenticated with the encrypted message and
+  preserved for independent clients sharing a server. Reflected opposite-direction
+  messages, wrong identifiers and unauthenticated input receive no application reply.
+* A bounded window suppresses repeat delivery of the most recent 4096 encrypted
+  messages, while still acknowledging duplicates. This is a bounded duplicate
+  filter, not permanent replay protection. FrameMgr still handles loss/retransmission.
+* Legacy framing, forwarding, congestion control and default configuration remain
+  available. Echo mode requires authenticated encryption and raw IPv4 ICMP sockets.
+  Unprivileged Android datagram ICMP can rewrite identifiers and is rejected.
+
+## Deployment requirements
+
+Both hosts must accept incoming Echo Requests from their peer. This mode cannot
+work through a path that permits only client-originated Echo Requests and their
+matching replies. NAT and firewalls may treat server-originated requests
+differently; verify the actual path before switching an existing service.
+
+Linux normally generates its own Echo Replies in addition to the replies generated
+here. To obtain a single exact reply per request, the operator must suppress those
+kernel replies on **both** dedicated tunnel hosts or in their dedicated network
+namespaces. For example, record the existing value before using:
+
+```sh
+sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
+```
+
+This affects normal ping responses on that host/namespace. The application does
+not change this global setting or firewall rules automatically. Restore the
+previous value when disabling the tunnel. Leaving kernel replies enabled does
+not carry application data through them, but can expose duplicate replies.
+
+## OpenVPN TCP/2083 example
+
+These example addresses must be replaced. OpenVPN must be reachable on the
+foreign host at `127.0.0.1:2083`; the Iran-side port must be free. Preserve the
+existing OpenVPN certificates, keys and server verification settings.
+
+Foreign host (`server.json`):
+
+```json
+{
+  "type": "server",
+  "icmp_listen": "0.0.0.0",
+  "password": "REPLACE_WITH_A_STRONG_SHARED_PASSWORD",
+  "encrypt": "chacha20",
+  "echo_mode": true
+}
+```
+
+Iran host (`client.json`):
+
+```json
+{
+  "type": "client",
+  "listen": "0.0.0.0:2083",
+  "server": "2.2.2.2",
+  "target": "127.0.0.1:2083",
+  "password": "REPLACE_WITH_A_STRONG_SHARED_PASSWORD",
+  "encrypt": "chacha20",
+  "echo_mode": true
+}
+```
+
+Protect each file with `chmod 600`. Run the corresponding config with
+`sudo ./pingtunnel-echo -c server.json` or `sudo ./pingtunnel-echo -c client.json`.
+The OpenVPN client connects to the Iran host's real IP on TCP/2083.
+
+## What this change establishes
+
+The change fixes the observable mismatch between an Echo Request's payload and
+the application's Echo Reply. It retains AEAD encryption of internal messages.
+It does not reproduce the timing, size distribution or traffic rate of ordinary
+ping, conceal that the protocol is ICMP, or prevent an operator from blocking
+or limiting ICMP. It has not been validated against a particular operator's DPI.
+Exact replies also add carrier traffic; measure bandwidth and throughput on the
+actual link before deploying broadly.
+
+Tests cover exact replies, invalid input, mode separation, session routing,
+duplicate delivery, sequence wrapping, bounded replay state, and end-to-end
+TCP/UDP/SOCKS forwarding. Real-ICMP tests must report their underlay explicitly;
+the unprivileged harness can otherwise use its in-process UDP transport.
+
+Build with the Go version pinned in `go.mod`. The repository also provides a
+ready Linux amd64 binary named `pingtunnel`; the command below builds a separate
+`pingtunnel-echo` executable from source:
+
+```sh
+go build -mod=readonly -trimpath -o pingtunnel-echo ./cmd
+go test ./... -skip '^TestE2E' -count=1
+go test -race ./... -run 'TestEchoMode|TestLoadConfigEchoMode|TestWireCompatWithOldVersion' -count=1
+```
+
+On Linux, the following runs selected end-to-end tests in a private loopback-only
+user/network namespace. The sysctl affects only that temporary namespace:
+
+```sh
+go test -c -o /tmp/pingtunnel-echo.test .
+unshare --user --map-root-user --net sh -c '
+  set -e
+  ip link set lo up
+  sysctl -w net.ipv4.icmp_echo_ignore_all=1
+  PINGTUNNEL_E2E_REQUIRE_REAL_ICMP=1 /tmp/pingtunnel-echo.test \
+    -test.run "^TestE2E_(EchoMode|EchoModeTwoClients|TCP_ForwardEcho|UDP_ForwardProxy|SOCKS5_ForwardProxy)$" \
+    -test.v -test.timeout=3m
+'
+```
