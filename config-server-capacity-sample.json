@@ -1,0 +1,13 @@
+{
+  "type": "server",
+  "icmp_listen": "0.0.0.0",
+  "password": "REPLACE_WITH_A_STRONG_SHARED_PASSWORD",
+  "encrypt": "chacha20",
+  "echo_mode": true,
+  "padding_max": 32,
+  "maxconn": 4096,
+  "conntt": 5000,
+  "congestion": "bb",
+  "loglevel": "warn",
+  "nolog": true
+}

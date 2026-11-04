@@ -1,0 +1,15 @@
+goos: linux
+goarch: amd64
+pkg: github.com/esrrhs/pingtunnel
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkEncryptedPadding/0-4 	 1140595	      1162 ns/op	 817.70 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/0-4 	 1000000	      1190 ns/op	 798.57 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/0-4 	 1000000	      1031 ns/op	 921.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/32-4         	 1000000	      1222 ns/op	 777.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/32-4         	 1061316	      1116 ns/op	 851.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/32-4         	  927400	      1220 ns/op	 778.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/64-4         	 1000000	      1154 ns/op	 823.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/64-4         	 1199461	      1153 ns/op	 824.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncryptedPadding/64-4         	 1215290	      1036 ns/op	 917.19 MB/s	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/esrrhs/pingtunnel	21.314s

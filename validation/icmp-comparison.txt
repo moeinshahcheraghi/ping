@@ -1,0 +1,38 @@
+net.ipv4.icmp_echo_ignore_all = 1
+=== RUN   TestE2E_Saturation_PaddedEcho
+    e2e_saturation_test.go:51: ICMP underlay: real raw socket (privileged)
+[38;5;196m[ERROR] [2026-11-04T22:55:55.613485352Z] [client.go:1171] [github.com/esrrhs/pingtunnel.(*Client).AcceptSock5Conn] socks handshake: EOF
+[0;00m    e2e_saturation_test.go:148: interactive 0: ok in 8.033908ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 1: ok in 3.931423ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 2: ok in 2.184182ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 3: ok in 2.573113ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 4: ok in 2.472868ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 5: ok in 5.822035ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 6: ok in 3.527109ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 7: ok in 3.376364ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 8: ok in 1.81455ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 9: ok in 1.52808ms under full bandwidth
+    e2e_saturation_test.go:109: download 1: 16 MiB verified
+    e2e_saturation_test.go:109: download 0: 16 MiB verified
+    e2e_saturation_test.go:109: download 2: 16 MiB verified
+    e2e_saturation_test.go:171: tunnel survived full-bandwidth saturation: downloads=3 interactive ok=10 fail=0
+--- PASS: TestE2E_Saturation_PaddedEcho (25.90s)
+=== RUN   TestE2E_Saturation_EchoBaseline
+    e2e_saturation_test.go:51: ICMP underlay: real raw socket (privileged)
+[38;5;196m[ERROR] [2026-11-04T22:56:21.505480986Z] [client.go:1171] [github.com/esrrhs/pingtunnel.(*Client).AcceptSock5Conn] socks handshake: EOF
+[0;00m    e2e_saturation_test.go:148: interactive 0: ok in 4.161673ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 1: ok in 5.268923ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 2: ok in 2.593057ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 3: ok in 46.907263ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 4: ok in 2.960958ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 5: ok in 1.682025ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 6: ok in 1.642949ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 7: ok in 2.345971ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 8: ok in 1.089225ms under full bandwidth
+    e2e_saturation_test.go:148: interactive 9: ok in 1.781683ms under full bandwidth
+    e2e_saturation_test.go:109: download 0: 16 MiB verified
+    e2e_saturation_test.go:109: download 2: 16 MiB verified
+    e2e_saturation_test.go:109: download 1: 16 MiB verified
+    e2e_saturation_test.go:171: tunnel survived full-bandwidth saturation: downloads=3 interactive ok=10 fail=0
+--- PASS: TestE2E_Saturation_EchoBaseline (22.87s)
+PASS

@@ -1,0 +1,8 @@
+go version go1.27.3 linux/amd64
+Linux x86_64
+5
+4b47f3306ffb0e83a99ec1537578c211e9e4d22e
+pingtunnel version 3.1, git 4b47f3306ffb-dirty, branch icmp-capacity, built at 2026-11-04
+/workspace/ping-release/bin/pingtunnel-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=-2bq8nkQjW8bykVWVmJy/iF6qwMlrcBonrfEzrKAB/3AY9yHIkK66u5vHJwqlV/NXUK2hWz1KA6uiq8p4j_, BuildID[sha1]=abfed5f990a2b860a8a03caf633ab448c1d964c9, stripped
+/workspace/ping-release/bin/pingtunnel-linux-arm64: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=r92m_c_21MMq_Xmz_TOI/BwxDldu1v1WXvdkOCVy3/xgZMae6b8B_JU18OABtV/IC9r14SlWvArdup2387e, BuildID[sha1]=621c566487b860504995f39298c6067eda099d4a, stripped
+/workspace/ping-release/bin/pingtunnel-linux-armv7: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), statically linked, Go BuildID=MZ0RKx5sX9ozrG75R5Y-/eYHsjwAdR4TlU-CBt3ex/OS0wJ44m_cJ-_ma5WjZ3/1hPCfIUbwy4GAWIvw_yw, BuildID[sha1]=222fa4ad8998d356a4b07369038f610c80c68a3f, stripped
