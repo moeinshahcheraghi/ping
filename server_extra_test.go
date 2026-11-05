@@ -41,6 +41,7 @@ func testPacketTCP(id string, target string) *Packet {
 	p := testPacket(id, MyMsg_DATA, target)
 	p.my.Tcpmode = 1
 	p.my.TcpmodeMaxwin = int32(DEFAULT_TCP_WIN)
+	p.my.TcpmodeBuffersize = int32(DEFAULT_TCP_BUF)
 	return p
 }
 

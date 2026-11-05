@@ -1,7 +1,7 @@
 package pingtunnel
 
 import (
-	"container/list"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -14,6 +14,7 @@ import (
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/pingtunnel/internal/reliable"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -154,6 +155,24 @@ type Client struct {
 	resolveRetryBackoff  time.Duration
 }
 
+// ConfigureTCP sets per-connection memory and in-flight limits before Run.
+// Zero selects the historical default. The client sends these values to the
+// server in the existing negotiation fields, so no wire format change is needed.
+func (p *Client) ConfigureTCP(bufferBytes, windowFrames int) error {
+	if bufferBytes == 0 {
+		bufferBytes = DEFAULT_TCP_BUF
+	}
+	if windowFrames == 0 {
+		windowFrames = DEFAULT_TCP_WIN
+	}
+	if err := validateTCPResources(bufferBytes, windowFrames); err != nil {
+		return fmt.Errorf("invalid TCP resources: %w", err)
+	}
+	p.tcpmode_buffersize = bufferBytes
+	p.tcpmode_maxwin = windowFrames
+	return nil
+}
+
 type ClientConn struct {
 	exit     atomic.Bool
 	kicked   atomic.Bool // the server gave up on this conn: deliver what we hold, then close
@@ -178,7 +197,7 @@ type ClientConn struct {
 	udpRelayConn  *net.UDPConn
 	udpTargetAddr string
 
-	fm *network.FrameMgr
+	fm *reliable.FrameMgr
 
 	// fmLock serializes the FrameMgr calls that touch its unsynchronized
 	// close flags (CloseSend/IsRemoteSendClosed/CloseFlushed) with Update,
@@ -381,18 +400,22 @@ func (p *Client) Run() error {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
-		nextPingAt := time.Now()
+		pingTimer := time.NewTimer(0)
+		defer pingTimer.Stop()
 		for !p.exit.Load() {
-			p.checkTimeoutConn()
-			p.showNet()
-
-			now := time.Now()
-			if !now.Before(nextPingAt) {
+			select {
+			case <-ticker.C:
+				p.checkTimeoutConn()
+				p.showNet()
+				p.maybeRefreshServerAddr(time.Now())
+			case <-pingTimer.C:
 				p.ping()
-				nextPingAt = now.Add(p.nextPingInterval(now))
+				interval := p.nextPingInterval(time.Now())
+				if p.cryptoConfig != nil && p.cryptoConfig.EchoMode {
+					interval = jitterHeartbeat(interval)
+				}
+				pingTimer.Reset(interval)
 			}
-			p.maybeRefreshServerAddr(now)
-			<-ticker.C
 		}
 	}()
 
@@ -464,15 +487,17 @@ func (p *Client) AcceptTcp() error {
 // control, through the shared underlay quanta. Connect-phase negotiation
 // passes the tcpmode parameters; steady-state and close passes zeroes, matching
 // the previous sendICMP argument lists.
-func (p *Client) emitClientFrames(clientConn *ClientConn, targetAddr string, sendlist *list.List,
+func (p *Client) emitClientFrames(clientConn *ClientConn, targetAddr string, frames []*network.Frame,
 	tcpmodeBuf, tcpmodeWin, tcpmodeResend, tcpmodeCompress, tcpmodeStat, timeout int,
 	mark func(*network.Frame)) {
-	p.share.emitFrames(sendlist, func(f *network.Frame) int {
+	p.share.emitFrames(frames, func(f *network.Frame) int {
 		if mark != nil {
 			mark(f)
 		}
-		mb, err := clientConn.fm.MarshalFrame(f)
+		bp := getSendBuf(0)
+		mb, err := clientConn.fm.MarshalFrameAppend((*bp)[:0], f)
 		if err != nil {
+			putSendBuf(bp)
 			addr := ""
 			if clientConn.tcpaddr != nil {
 				addr = clientConn.tcpaddr.String()
@@ -480,18 +505,23 @@ func (p *Client) emitClientFrames(clientConn *ClientConn, targetAddr string, sen
 			loggo.Error("Error tcp Marshal %s %s %s", clientConn.id, addr, err)
 			return 1
 		}
+		n := len(mb)
 		seq := p.sequence.Add(1)
 		sendICMP(p.id, int(seq), p.conn, p.ipaddrServer, targetAddr, clientConn.id, (uint32)(MyMsg_DATA), mb,
 			SEND_PROTO, RECV_PROTO, p.key,
 			p.tcpmode, tcpmodeBuf, tcpmodeWin, tcpmodeResend, tcpmodeCompress, tcpmodeStat,
 			timeout, p.cryptoConfig)
+		// sendICMP copies the payload into its own pooled wire buffer, so the
+		// marshal buffer can go back to the pool before the length accounting.
+		putSendBuf(bp)
 		p.sendPacket.Add(1)
-		p.sendPacketSize.Add((uint64)(len(mb)))
-		if len(mb) == 0 {
+		p.sendPacketSize.Add((uint64)(n))
+		if n == 0 {
 			return 1
 		}
-		return len(mb)
+		return n
 	})
+	clientConn.fm.PutSendFrames(frames)
 }
 
 func (p *Client) AcceptTcpConn(conn *net.TCPConn, targetAddr string) {
@@ -510,7 +540,8 @@ func (p *Client) AcceptTcpConn(conn *net.TCPConn, targetAddr string) {
 
 	uuid := common.UniqueId()
 
-	fm := network.NewFrameMgr(FRAME_MAX_SIZE, FRAME_MAX_ID, p.tcpmode_buffersize, p.tcpmode_maxwin, p.tcpmode_resend_timems, p.tcpmode_compress, p.tcpmode_stat)
+	fm := reliable.NewFrameMgr(FRAME_MAX_SIZE, FRAME_MAX_ID, p.tcpmode_buffersize, p.tcpmode_maxwin, p.tcpmode_resend_timems, p.tcpmode_compress, p.tcpmode_stat)
+	fm.SetIdleControlInterval(5 * time.Second)
 	if p.congestion == "bb" {
 		fm.SetCongestion(newBBControl())
 	}
@@ -547,9 +578,9 @@ func (p *Client) AcceptTcpConn(conn *net.TCPConn, targetAddr string) {
 			break
 		}
 		clientConn.fmUpdate()
-		sendlist := clientConn.fm.GetSendList()
-		hadWork := sendlist.Len() > 0
-		p.emitClientFrames(clientConn, targetAddr, sendlist,
+		frames := clientConn.fm.GetSendFrames()
+		hadWork := len(frames) > 0
+		p.emitClientFrames(clientConn, targetAddr, frames,
 			p.tcpmode_buffersize, p.tcpmode_maxwin, p.tcpmode_resend_timems, p.tcpmode_compress, p.tcpmode_stat, p.timeout,
 			nil)
 		now := common.GetNowUpdateInSecond()
@@ -568,7 +599,7 @@ func (p *Client) AcceptTcpConn(conn *net.TCPConn, targetAddr string) {
 		select {
 		case <-clientConn.activity:
 			connectWait.hit()
-		case <-time.After(wait):
+		case <-connectWait.arm(wait):
 		}
 	}
 
@@ -600,7 +631,7 @@ func (p *Client) AcceptTcpConn(conn *net.TCPConn, targetAddr string) {
 				case <-clientConn.activity:
 					readWait.hit()
 					continue
-				case <-time.After(wait):
+				case <-readWait.arm(wait):
 					continue
 				}
 			}
@@ -648,10 +679,10 @@ mainLoop:
 
 		clientConn.fmUpdate()
 
-		sendlist := clientConn.fm.GetSendList()
-		if sendlist.Len() > 0 {
+		frames := clientConn.fm.GetSendFrames()
+		if len(frames) > 0 {
 			hadWork = true
-			p.emitClientFrames(clientConn, targetAddr, sendlist, 0, 0, 0, 0, 0, 0, func(f *network.Frame) {
+			p.emitClientFrames(clientConn, targetAddr, frames, 0, 0, 0, 0, 0, 0, func(f *network.Frame) {
 				if f.Data != nil && f.Data.Type == (int32)(network.FrameData_USER_DATA) {
 					// Only real payload counts as conn activity: heartbeat
 					// and ACK frames keep the tunnel alive without keeping
@@ -686,8 +717,8 @@ mainLoop:
 		// carrying this conn id): its own send window may already be empty —
 		// everything acked into our buffers — so without this signal it
 		// cannot tell backpressure from a dead conn.
-		if clientConn.fm.GetRecvBufferSize() > 0 || clientConn.fm.GetSendWinSize() > 0 {
-			if time.Duration(now.UnixNano()-clientConn.lastCongestionPing.Load()) >= time.Second {
+		if time.Duration(now.UnixNano()-clientConn.lastCongestionPing.Load()) >= time.Second {
+			if clientConn.fm.GetRecvBufferSize() > 0 || clientConn.fm.GetSendWinSize() > 0 {
 				clientConn.lastCongestionPing.Store(now.UnixNano())
 				tb, _ := time.Now().MarshalBinary()
 				seq := p.sequence.Add(1)
@@ -770,7 +801,7 @@ mainLoop:
 					halfClosed = true
 					loggo.Debug("local half-close conn %s %s", clientConn.id, clientConn.tcpaddr.String())
 				}
-			case <-time.After(wait):
+			case <-loopWait.arm(wait):
 			}
 		} else {
 			loopWait.hit()
@@ -794,10 +825,10 @@ mainLoop:
 
 		clientConn.fmUpdate()
 
-		sendlist := clientConn.fm.GetSendList()
-		if sendlist.Len() > 0 {
+		frames := clientConn.fm.GetSendFrames()
+		if len(frames) > 0 {
 			hadWork = true
-			p.emitClientFrames(clientConn, targetAddr, sendlist, 0, 0, 0, 0, 0, 0, nil)
+			p.emitClientFrames(clientConn, targetAddr, frames, 0, 0, 0, 0, 0, 0, nil)
 		}
 
 		if clientConn.fm.GetRecvBufferSize() > 0 {
@@ -815,8 +846,8 @@ mainLoop:
 		// left is retransmitted from here for up to 60s. Keep signalling
 		// congestion while that runs, or the server reaps the conn as idle
 		// mid-tail (an unthrottled loopback target dies within ~50ms).
-		if clientConn.fm.GetRecvBufferSize() > 0 || clientConn.fm.GetSendWinSize() > 0 {
-			if time.Duration(now.UnixNano()-clientConn.lastCongestionPing.Load()) >= time.Second {
+		if time.Duration(now.UnixNano()-clientConn.lastCongestionPing.Load()) >= time.Second {
+			if clientConn.fm.GetRecvBufferSize() > 0 || clientConn.fm.GetSendWinSize() > 0 {
 				clientConn.lastCongestionPing.Store(now.UnixNano())
 				tb, _ := time.Now().MarshalBinary()
 				seq := p.sequence.Add(1)
@@ -861,7 +892,7 @@ mainLoop:
 		select {
 		case <-clientConn.activity:
 			closeWait.hit()
-		case <-time.After(wait):
+		case <-closeWait.arm(wait):
 		}
 	}
 
@@ -939,7 +970,7 @@ func (p *Client) processPacket(packet *Packet) {
 		return
 	}
 
-	if !icmpDatagram && packet.echoId != p.id {
+	if !icmpDatagram.Load() && packet.echoId != p.id {
 		return
 	}
 

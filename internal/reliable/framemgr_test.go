@@ -1,0 +1,731 @@
+package reliable
+
+import (
+	"bytes"
+	"container/list"
+	"fmt"
+	"math/rand"
+	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+)
+
+func TestFrameMgrRTTInitUnit(t *testing.T) {
+	fm := NewFrameMgr(100, 1000, 64*1024, 64, 200, 0, 0)
+	want := int64(200) * int64(time.Millisecond)
+	if fm.rttns != want {
+		t.Fatalf("rttns init = %d, want %d (resend_timems as duration nanoseconds)", fm.rttns, want)
+	}
+}
+
+func TestFrameMgrSendIdRankWrap(t *testing.T) {
+	fm := NewFrameMgr(100, 100, 64*1024, 32, 50, 0, 0)
+	if g, w := fm.sendIdRank(90, 5), int32(15); g != w {
+		t.Fatalf("sendIdRank(90,5)=%d want %d", g, w)
+	}
+	if g, w := fm.sendIdRank(90, 95), int32(5); g != w {
+		t.Fatalf("sendIdRank(90,95)=%d want %d", g, w)
+	}
+	if fm.sendIdRank(10, 10) != 0 {
+		t.Fatal("sendIdRank same id should be 0")
+	}
+}
+
+func TestFrameMgrReqMapUsesHoleId(t *testing.T) {
+	// Tiny recv buffer so frame 0 cannot be drained; FrontInter stays valid and
+	// holes 1,2 before frame 3 should all be REQ'd in one pass.
+	fm := NewFrameMgr(64, 1000, 16, 64, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	f0 := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   0,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: make([]byte, 64)},
+	}
+	f3 := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   3,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: []byte("x")},
+	}
+	if err := fm.recvwin.Set(0, f0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fm.recvwin.Set(3, f3); err != nil {
+		t.Fatal(err)
+	}
+
+	fm.combineWindowToRecvBuffer(time.Now().UnixNano())
+	sl := fm.GetSendList()
+	ids := map[int32]struct{}{}
+	for e := sl.Front(); e != nil; e = e.Next() {
+		fr := e.Value.(*Frame)
+		if fr.Type == int32(Frame_REQ) {
+			for _, id := range fr.Dataid {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	for _, want := range []int32{1, 2} {
+		if _, ok := ids[want]; !ok {
+			t.Fatalf("missing REQ for hole %d, got %v", want, ids)
+		}
+	}
+}
+
+func recvDataFrame(id int32, payload []byte) *Frame {
+	return &Frame{
+		Type: int32(Frame_DATA),
+		Id:   id,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: payload},
+	}
+}
+
+func reqIdsFromSendList(sl *list.List) map[int32]struct{} {
+	ids := map[int32]struct{}{}
+	for e := sl.Front(); e != nil; e = e.Next() {
+		fr := e.Value.(*Frame)
+		if fr.Type == int32(Frame_REQ) {
+			for _, id := range fr.Dataid {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+// TestFrameMgrReqWhenBeginHole covers the case where recvid itself (the
+// begin slot of recvwin) is missing while later frames already arrived.
+// Previously FrontInter() returned nil on an empty begin, so no REQ was
+// ever produced for the first missing frame and recovery relied solely on
+// the sender's timeout retransmission.
+func TestFrameMgrReqWhenBeginHole(t *testing.T) {
+	fm := NewFrameMgr(64, 1000, 16, 64, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	if err := fm.recvwin.Set(1, recvDataFrame(1, []byte("a"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := fm.recvwin.Set(2, recvDataFrame(2, []byte("bb"))); err != nil {
+		t.Fatal(err)
+	}
+
+	fm.combineWindowToRecvBuffer(time.Now().UnixNano())
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if _, ok := ids[0]; !ok {
+		t.Fatalf("missing REQ for begin hole 0, got %v", ids)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("only hole 0 should be REQ'd, got %v", ids)
+	}
+}
+
+// TestFrameMgrReqAfterConsumeThenHole drives frame 0 through the full
+// receive path so recvid advances to 1, then loses frame 1 and delivers
+// 2 and 3 out of order: a single REQ for 1 must be produced.
+func TestFrameMgrReqAfterConsumeThenHole(t *testing.T) {
+	fm := NewFrameMgr(64, 1000, 16, 64, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	fm.OnRecvFrame(recvDataFrame(0, []byte("x")))
+	fm.Update()
+	fm.GetSendList()
+	if fm.recvid != 1 {
+		t.Fatalf("recvid after draining frame 0 = %d, want 1", fm.recvid)
+	}
+	fm.SkipRecvBuffer(fm.GetRecvBufferSize())
+
+	fm.OnRecvFrame(recvDataFrame(2, []byte("y")))
+	fm.OnRecvFrame(recvDataFrame(3, []byte("zz")))
+	fm.Update()
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if _, ok := ids[1]; !ok {
+		t.Fatalf("missing REQ for hole 1, got %v", ids)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("only hole 1 should be REQ'd, got %v", ids)
+	}
+}
+
+// TestFrameMgrReqAcrossWrap verifies hole scanning when recvid is near
+// maxId and some frames already wrapped around the id ring.
+func TestFrameMgrReqAcrossWrap(t *testing.T) {
+	const maxId int32 = 10
+	fm := NewFrameMgr(64, int(maxId), 1024, 5, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	// Deliver 0..7 in order so recvid slides to 8.
+	for id := int32(0); id < 8; id++ {
+		fm.OnRecvFrame(recvDataFrame(id, []byte{byte(id)}))
+		fm.Update()
+		fm.GetSendList()
+	}
+	if fm.recvid != 8 {
+		t.Fatalf("recvid = %d, want 8", fm.recvid)
+	}
+
+	// Frame 8 lost; frame 9 arrives: REQ must name exactly 8.
+	fm.OnRecvFrame(recvDataFrame(9, []byte("9")))
+	fm.Update()
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if len(ids) != 1 {
+		t.Fatalf("exactly hole 8 should be REQ'd before wrap, got %v", ids)
+	}
+	if _, ok := ids[8]; !ok {
+		t.Fatalf("missing REQ for hole 8, got %v", ids)
+	}
+
+	// Wrapped frame 0 also arrives. The REQ rate limit may suppress a
+	// resend inside one rtt; force the next combine to re-evaluate and
+	// confirm the wrapped arrival neither hides hole 8 nor adds spurious
+	// ids for frames the sender has not produced yet.
+	fm.OnRecvFrame(recvDataFrame(0, []byte("wrap0")))
+	fm.Update()
+	fm.GetSendList()
+	if err, v := fm.recvwin.Get(0); err != nil || v == nil {
+		t.Fatalf("wrapped frame 0 should be accepted in recvwin: err=%v v=%v", err, v)
+	}
+	fm.rttns = 0
+	fm.combineWindowToRecvBuffer(time.Now().UnixNano())
+	ids = reqIdsFromSendList(fm.GetSendList())
+	if len(ids) != 1 {
+		t.Fatalf("exactly hole 8 should be REQ'd across wrap, got %v", ids)
+	}
+	if _, ok := ids[8]; !ok {
+		t.Fatalf("missing REQ for hole 8 after wrap, got %v", ids)
+	}
+}
+
+func TestFrameMgrReliableNoLoss(t *testing.T) {
+	frameMgrReliableTransfer(t, frameMgrSimConfig{
+		cutSize:     200,
+		maxId:       10000,
+		bufferSize:  1024 * 1024,
+		maxWin:      256,
+		resendMs:    20,
+		lossProb:    0,
+		totalBytes:  200 * 1024,
+		useBB:       true,
+		maxDuration: 30 * time.Second,
+		writeChunk:  4096,
+		seed:        1,
+	})
+}
+
+func TestFrameMgrReliableRandomLoss(t *testing.T) {
+	frameMgrReliableTransfer(t, frameMgrSimConfig{
+		cutSize:     200,
+		maxId:       10000,
+		bufferSize:  1024 * 1024,
+		maxWin:      256,
+		resendMs:    20,
+		lossProb:    0.05,
+		totalBytes:  200 * 1024,
+		useBB:       true,
+		maxDuration: 60 * time.Second,
+		writeChunk:  4096,
+		seed:        42,
+	})
+}
+
+func TestFrameMgrReliableHighLossWrap(t *testing.T) {
+	// Tiny maxId forces sendid wrap; bb exercises wrap-aware ctLastSendId.
+	frameMgrReliableTransfer(t, frameMgrSimConfig{
+		cutSize:     64,
+		maxId:       128,
+		bufferSize:  512 * 1024,
+		maxWin:      32,
+		resendMs:    10,
+		lossProb:    0.10,
+		totalBytes:  256 * 1024,
+		useBB:       true,
+		maxDuration: 120 * time.Second,
+		writeChunk:  1024,
+		seed:        7,
+	})
+}
+
+func TestFrameMgrReliableLongStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip long stress in -short")
+	}
+	frameMgrReliableTransfer(t, frameMgrSimConfig{
+		cutSize:     400,
+		maxId:       1000,
+		bufferSize:  2 * 1024 * 1024,
+		maxWin:      128,
+		resendMs:    15,
+		lossProb:    0.08,
+		totalBytes:  2 * 1024 * 1024,
+		useBB:       true,
+		maxDuration: 3 * time.Minute,
+		writeChunk:  8192,
+		seed:        99,
+	})
+}
+
+func TestFrameMgrReliableMultiSeedLoss(t *testing.T) {
+	losses := []float64{0.01, 0.05, 0.15}
+	seeds := []int64{1, 2, 3, 5, 8, 13, 21, 34}
+	for _, loss := range losses {
+		for _, seed := range seeds {
+			loss, seed := loss, seed
+			name := fmt.Sprintf("loss%.2f_seed%d", loss, seed)
+			t.Run(name, func(t *testing.T) {
+				frameMgrReliableTransfer(t, frameMgrSimConfig{
+					cutSize:     128,
+					maxId:       256,
+					bufferSize:  512 * 1024,
+					maxWin:      64,
+					resendMs:    10,
+					lossProb:    loss,
+					totalBytes:  128 * 1024,
+					useBB:       true,
+					maxDuration: 90 * time.Second,
+					writeChunk:  2048,
+					seed:        seed,
+				})
+			})
+		}
+	}
+}
+
+func TestFrameMgrReliableBidirectional(t *testing.T) {
+	rng := rand.New(rand.NewSource(123))
+	a := NewFrameMgr(128, 512, 1024*1024, 64, 15, 0, 0)
+	b := NewFrameMgr(128, 512, 1024*1024, 64, 15, 0, 0)
+	a.SetCongestion(&BBCongestion{})
+	b.SetCongestion(&BBCongestion{})
+	if err := frameMgrConnect(a, b, 0.05, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 64 * 1024
+	srcA := make([]byte, n)
+	srcB := make([]byte, n)
+	for i := 0; i < n; i++ {
+		srcA[i] = byte(rng.Intn(256))
+		srcB[i] = byte(rng.Intn(256))
+	}
+	var gotA, gotB bytes.Buffer
+	offA, offB := 0, 0
+	deadline := time.Now().Add(60 * time.Second)
+	loss := 0.05
+
+	for gotA.Len() < n || gotB.Len() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("bidi timeout gotA=%d gotB=%d", gotA.Len(), gotB.Len())
+		}
+		for offA < n {
+			left := a.GetSendBufferLeft()
+			if left <= 0 {
+				break
+			}
+			m := n - offA
+			if m > left {
+				m = left
+			}
+			if m > 2048 {
+				m = 2048
+			}
+			a.WriteSendBuffer(srcA[offA : offA+m])
+			offA += m
+		}
+		for offB < n {
+			left := b.GetSendBufferLeft()
+			if left <= 0 {
+				break
+			}
+			m := n - offB
+			if m > left {
+				m = left
+			}
+			if m > 2048 {
+				m = 2048
+			}
+			b.WriteSendBuffer(srcB[offB : offB+m])
+			offB += m
+		}
+		a.Update()
+		b.Update()
+		frameMgrExchange(a, b, rng, loss)
+		frameMgrExchange(b, a, rng, loss)
+		for a.GetRecvBufferSize() > 0 && gotA.Len() < n {
+			buf := a.GetRecvReadLineBuffer()
+			if len(buf) == 0 {
+				break
+			}
+			m := len(buf)
+			if m > n-gotA.Len() {
+				m = n - gotA.Len()
+			}
+			gotA.Write(buf[:m])
+			a.SkipRecvBuffer(m)
+		}
+		for b.GetRecvBufferSize() > 0 && gotB.Len() < n {
+			buf := b.GetRecvReadLineBuffer()
+			if len(buf) == 0 {
+				break
+			}
+			m := len(buf)
+			if m > n-gotB.Len() {
+				m = n - gotB.Len()
+			}
+			gotB.Write(buf[:m])
+			b.SkipRecvBuffer(m)
+		}
+		if offA >= n && offB >= n {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !bytes.Equal(gotA.Bytes(), srcB) {
+		t.Fatal("A did not receive B payload")
+	}
+	if !bytes.Equal(gotB.Bytes(), srcA) {
+		t.Fatal("B did not receive A payload")
+	}
+}
+
+type frameMgrSimConfig struct {
+	cutSize     int
+	maxId       int
+	bufferSize  int
+	maxWin      int
+	resendMs    int
+	lossProb    float64
+	totalBytes  int
+	useBB       bool
+	maxDuration time.Duration
+	writeChunk  int
+	seed        int64
+}
+
+func frameMgrReliableTransfer(t *testing.T, cfg frameMgrSimConfig) {
+	t.Helper()
+	rng := rand.New(rand.NewSource(cfg.seed))
+
+	a := NewFrameMgr(cfg.cutSize, cfg.maxId, cfg.bufferSize, cfg.maxWin, cfg.resendMs, 0, 0)
+	b := NewFrameMgr(cfg.cutSize, cfg.maxId, cfg.bufferSize, cfg.maxWin, cfg.resendMs, 0, 0)
+	if cfg.useBB {
+		a.SetCongestion(&BBCongestion{})
+		b.SetCongestion(&BBCongestion{})
+	}
+	a.SetDebugid("a")
+	b.SetDebugid("b")
+
+	if err := frameMgrConnect(a, b, cfg.lossProb, 5*time.Second); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	src := make([]byte, cfg.totalBytes)
+	for i := range src {
+		src[i] = byte(rng.Intn(256))
+	}
+
+	var got bytes.Buffer
+	got.Grow(cfg.totalBytes)
+	writeOff := 0
+	deadline := time.Now().Add(cfg.maxDuration)
+	idleRounds := 0
+
+	for got.Len() < cfg.totalBytes {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout after %v: wrote=%d/%d got=%d/%d loss=%.2f maxId=%d",
+				cfg.maxDuration, writeOff, cfg.totalBytes, got.Len(), cfg.totalBytes, cfg.lossProb, cfg.maxId)
+		}
+
+		progress := false
+
+		for writeOff < cfg.totalBytes {
+			left := a.GetSendBufferLeft()
+			if left <= 0 {
+				break
+			}
+			n := cfg.writeChunk
+			if n > left {
+				n = left
+			}
+			if n > cfg.totalBytes-writeOff {
+				n = cfg.totalBytes - writeOff
+			}
+			a.WriteSendBuffer(src[writeOff : writeOff+n])
+			writeOff += n
+			progress = true
+		}
+
+		a.Update()
+		b.Update()
+
+		if frameMgrExchange(a, b, rng, cfg.lossProb) {
+			progress = true
+		}
+		if frameMgrExchange(b, a, rng, cfg.lossProb) {
+			progress = true
+		}
+
+		for b.GetRecvBufferSize() > 0 {
+			buf := b.GetRecvReadLineBuffer()
+			if len(buf) == 0 {
+				break
+			}
+			need := cfg.totalBytes - got.Len()
+			if need <= 0 {
+				break
+			}
+			n := len(buf)
+			if n > need {
+				n = need
+			}
+			got.Write(buf[:n])
+			b.SkipRecvBuffer(n)
+			progress = true
+		}
+
+		if writeOff >= cfg.totalBytes && !a.close {
+			a.Close()
+		}
+
+		if !progress {
+			idleRounds++
+			if idleRounds > 100000 {
+				t.Fatalf("no progress: wrote=%d got=%d", writeOff, got.Len())
+			}
+			time.Sleep(time.Millisecond)
+		} else {
+			idleRounds = 0
+		}
+	}
+
+	if !bytes.Equal(got.Bytes(), src) {
+		gb := got.Bytes()
+		n := len(gb)
+		if n > len(src) {
+			n = len(src)
+		}
+		idx := 0
+		for idx < n && gb[idx] == src[idx] {
+			idx++
+		}
+		t.Fatalf("payload mismatch at %d (gotLen=%d wantLen=%d)", idx, got.Len(), len(src))
+	}
+
+	t.Logf("ok bytes=%d loss=%.2f maxId=%d approxDataFrames=%d",
+		cfg.totalBytes, cfg.lossProb, cfg.maxId, cfg.totalBytes/cfg.cutSize)
+}
+
+func frameMgrConnect(a, b *FrameMgr, loss float64, timeout time.Duration) error {
+	rng := rand.New(rand.NewSource(1))
+	a.Connect()
+	deadline := time.Now().Add(timeout)
+	for !a.IsConnected() || !b.IsConnected() {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("connect timeout a=%v b=%v", a.IsConnected(), b.IsConnected())
+		}
+		a.Update()
+		b.Update()
+		frameMgrExchange(a, b, rng, loss)
+		frameMgrExchange(b, a, rng, loss)
+		time.Sleep(time.Millisecond)
+	}
+	return nil
+}
+
+func frameMgrExchange(from, to *FrameMgr, rng *rand.Rand, loss float64) bool {
+	sl := from.GetSendList()
+	if sl.Len() == 0 {
+		return false
+	}
+	delivered := false
+	for e := sl.Front(); e != nil; e = e.Next() {
+		f := e.Value.(*Frame)
+		if loss > 0 && rng.Float64() < loss {
+			continue
+		}
+		deliverFrame(to, f)
+		delivered = true
+	}
+	return delivered
+}
+
+func deliverFrame(to *FrameMgr, f *Frame) {
+	cp, ok := proto.Clone(f).(*Frame)
+	if !ok || cp == nil {
+		cp = cloneFrame(f)
+	}
+	to.OnRecvFrame(cp)
+}
+
+func TestMarshalFrameAppend(t *testing.T) {
+	fm := NewFrameMgr(128, 1000, 64*1024, 64, 50, 0, 0)
+	f := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   7,
+		Data: &FrameData{
+			Type:     int32(FrameData_USER_DATA),
+			Compress: true,
+			Data:     []byte("append payload"),
+		},
+	}
+
+	want, err := fm.MarshalFrame(f)
+	if err != nil {
+		t.Fatalf("MarshalFrame: %v", err)
+	}
+	got, err := fm.MarshalFrameAppend(make([]byte, 0, 1024), f)
+	if err != nil {
+		t.Fatalf("MarshalFrameAppend: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalFrameAppend = %x, want %x", got, want)
+	}
+
+	// Appending into a non-empty destination must keep its prefix intact.
+	got2, err := fm.MarshalFrameAppend([]byte{0xaa}[:1], f)
+	if err != nil {
+		t.Fatalf("MarshalFrameAppend(prefix): %v", err)
+	}
+	if got2[0] != 0xaa || !bytes.Equal(got2[1:], want) {
+		t.Fatal("MarshalFrameAppend did not preserve the destination prefix")
+	}
+
+	// Marshaling must not leak Resend/Sendtime mutations onto the frame.
+	if f.Resend || f.Sendtime != 0 {
+		t.Fatalf("MarshalFrameAppend leaked side effects: resend=%v sendtime=%d", f.Resend, f.Sendtime)
+	}
+}
+
+func cloneFrame(f *Frame) *Frame {
+	cp := &Frame{
+		Type:     f.Type,
+		Resend:   f.Resend,
+		Sendtime: f.Sendtime,
+		Id:       f.Id,
+	}
+	if f.Dataid != nil {
+		cp.Dataid = append([]int32(nil), f.Dataid...)
+	}
+	if f.Data != nil {
+		cp.Data = &FrameData{
+			Type:     f.Data.Type,
+			Compress: f.Data.Compress,
+		}
+		if f.Data.Data != nil {
+			cp.Data.Data = append([]byte(nil), f.Data.Data...)
+		}
+	}
+	return cp
+}
+
+// TestGetSendFramesStaging pins the staging contract callers rely on: an
+// empty staging area yields nil (the per-Update idle case), a staged frame is
+// handed out exactly once, and a recycled slice is safe to hand out again.
+func TestGetSendFramesStaging(t *testing.T) {
+	fm := NewFrameMgr(888, 1000, 64*1024, 64, 200, 0, 0)
+
+	if got := fm.GetSendFrames(); got != nil {
+		t.Fatalf("empty staging returned %d frames, want nil", len(got))
+	}
+	fm.PutSendFrames(nil) // recycling an empty result must be a no-op
+	PutFrames(nil)        // and so must the legacy package-level helper
+
+	fm.Connect()
+	fm.Update()
+	frames := fm.GetSendFrames()
+	if len(frames) == 0 {
+		t.Fatal("Connect staged no frame")
+	}
+	if again := fm.GetSendFrames(); again != nil {
+		t.Fatalf("staging area not emptied: got %d frames", len(again))
+	}
+
+	// Make the staged frame due again, then confirm the FrameMgr stages into a
+	// fresh slice while the previous one is still held by the caller.
+	due := fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing after Connect")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0 // defeat the rtt gate so it is due now
+	fm.Update()
+	next := fm.GetSendFrames()
+	if len(next) == 0 {
+		t.Fatal("resend staged no frame")
+	}
+	if &next[0] == &frames[0] {
+		t.Fatal("GetSendFrames handed out the same slice twice")
+	}
+	fm.PutSendFrames(next)
+	fm.PutSendFrames(frames)
+
+	// GetSendList leaves an empty-but-capped staging slice behind. GetSendFrames
+	// must still report "no work" as nil and park that storage for reuse.
+	fm.Connect()
+	fm.Update()
+	if sl := fm.GetSendList(); sl.Len() == 0 {
+		t.Fatal("GetSendList saw no staged frame")
+	}
+	if got := fm.GetSendFrames(); got != nil {
+		t.Fatalf("GetSendFrames after GetSendList returned cap=%d, want nil", cap(got))
+	}
+	due = fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing after GetSendList")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0
+	fm.Update()
+	if again := fm.GetSendFrames(); len(again) == 0 {
+		t.Fatal("re-stage after GetSendList yielded nothing (parked storage lost?)")
+	} else {
+		fm.PutSendFrames(again)
+	}
+
+	// Regression: an empty GetSendFrames must not discard the parked spare. It
+	// used to overwrite the spare with the (nil) empty staging slice, forcing a
+	// fresh 512B staging slice on the next stage.
+	fm.Connect()
+	fm.Update()
+	spare := fm.GetSendFrames()
+	if len(spare) == 0 {
+		t.Fatal("Connect staged no frame")
+	}
+	fm.PutSendFrames(spare)
+	backing := &spare[0]
+	for i := 0; i < 3; i++ {
+		if got := fm.GetSendFrames(); got != nil {
+			t.Fatalf("empty staging returned cap=%d, want nil", cap(got))
+		}
+	}
+	due = fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing before re-stage")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0
+	fm.Update()
+	again2 := fm.GetSendFrames()
+	if len(again2) == 0 {
+		t.Fatal("re-stage yielded nothing")
+	}
+	if &again2[0] != backing {
+		t.Fatal("empty GetSendFrames dropped the parked spare slice")
+	}
+	fm.PutSendFrames(again2)
+}
+
+// BenchmarkFrameMgrUpdateIdle measures one Update + staging round trip on an
+// otherwise idle conn, the shape every pingtunnel conn loop runs at its
+// minimum sleep. The idle path must not allocate: GetSendFrames returns nil
+// without touching the slice pool, and PutSendFrames keeps the storage local.
+func BenchmarkFrameMgrUpdateIdle(b *testing.B) {
+	fm := NewFrameMgr(888, 1000000, 1024*1024, 20000, 400, 0, 0)
+	fm.Connect()
+	fm.Update()
+	fm.PutSendFrames(fm.GetSendFrames())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fm.Update()
+		fm.PutSendFrames(fm.GetSendFrames())
+	}
+}

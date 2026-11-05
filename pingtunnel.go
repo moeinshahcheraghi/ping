@@ -105,6 +105,10 @@ func sendICMP(id int, sequence int, conn icmpPacketConn, server *net.IPAddr, tar
 		return
 	}
 
+	if cryptoConfig != nil && cryptoConfig.paddingMax > 0 {
+		wireB = appendLengthPadding(wireB, cryptoConfig.paddingMax)
+	}
+
 	// The packet buffer carries [8B header][nonce][ciphertext] when
 	// encrypted, [8B header][plaintext] otherwise; the 8-byte headroom is
 	// reserved up front so the envelope is written directly into place.
@@ -137,6 +141,7 @@ func recvICMP(workResultLock *sync.WaitGroup, exit *atomic.Bool, conn icmpPacket
 	defer (*workResultLock).Done()
 
 	bytes := make([]byte, 10240)
+	plaintext := make([]byte, 0, len(bytes))
 	for !exit.Load() {
 		conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 		n, srcaddr, err := conn.ReadFrom(bytes)
@@ -168,15 +173,16 @@ func recvICMP(workResultLock *sync.WaitGroup, exit *atomic.Bool, conn icmpPacket
 		if cryptoConfig != nil {
 			packetCrypto := *cryptoConfig
 			packetCrypto.echoID = uint16(echoId)
-			payloadData, err = packetCrypto.Decrypt(payloadData)
+			payloadData, err = packetCrypto.DecryptInto(plaintext[:0], payloadData)
 			if err != nil {
 				loggo.Debug("recvICMP Decrypt error: %s", err)
 				continue
 			}
+			plaintext = payloadData
 		}
 
 		my := &MyMsg{}
-		err = proto.Unmarshal(payloadData, my)
+		err = (proto.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(payloadData, my)
 		if err != nil {
 			loggo.Debug("Unmarshal MyMsg error: %s", err)
 			continue

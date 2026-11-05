@@ -1,15 +1,18 @@
 package pingtunnel
 
-import "net"
+import (
+	"net"
+	"sync/atomic"
+)
 
-var icmpDatagram bool
+var icmpDatagram atomic.Bool
 
 func setICMPDatagram(enabled bool) {
-	icmpDatagram = enabled
+	icmpDatagram.Store(enabled)
 }
 
 func icmpDstAddr(ip *net.IPAddr) net.Addr {
-	if icmpDatagram {
+	if icmpDatagram.Load() {
 		return &net.UDPAddr{IP: ip.IP}
 	}
 	return ip

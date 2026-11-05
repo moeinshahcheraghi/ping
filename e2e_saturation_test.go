@@ -18,6 +18,18 @@ import (
 // keep working during the flood, pongs keep flowing, and new conns work
 // after the flood without a restart.
 func TestE2E_Saturation_FullBandwidthTunnelSurvival(t *testing.T) {
+	testSaturation(t, -1)
+}
+
+func TestE2E_Saturation_PaddedEcho(t *testing.T) {
+	testSaturation(t, 32)
+}
+
+func TestE2E_Saturation_EchoBaseline(t *testing.T) {
+	testSaturation(t, 0)
+}
+
+func testSaturation(t *testing.T, padding int) {
 	const (
 		downloads   = 3
 		perDownload = int64(16) << 20 // 16 MiB each, unthrottled
@@ -28,6 +40,14 @@ func TestE2E_Saturation_FullBandwidthTunnelSurvival(t *testing.T) {
 	opts := basePairOpts()
 	opts.direct = false
 	opts.timeout = 15
+	if padding >= 0 {
+		opts.echoMode = true
+		opts.crypto = CHACHA20
+		opts.cryptoKey = "padded-saturation-password"
+		opts.paddingMax = padding
+		opts.tcpBS = 256 << 10
+		opts.tcpMW = 512
+	}
 	p := startPair(t, opts)
 	defer p.Close()
 

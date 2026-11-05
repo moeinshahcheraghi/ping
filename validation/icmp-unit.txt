@@ -1,2 +1,0 @@
-ok  	github.com/esrrhs/pingtunnel	9.700s
-ok  	github.com/esrrhs/pingtunnel/cmd	3.581s

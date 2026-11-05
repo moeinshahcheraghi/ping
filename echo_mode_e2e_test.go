@@ -15,6 +15,7 @@ func TestE2E_EchoMode(t *testing.T) {
 			opts.crypto = CHACHA20
 			opts.cryptoKey = "echo-e2e-test-password"
 			opts.echoMode = true
+			opts.paddingMax = 32
 			opts.direct = kind != "socks5"
 			opts.udp = kind == "udp"
 			p := startPair(t, opts)
@@ -65,6 +66,7 @@ func TestE2E_EchoModeTwoClients(t *testing.T) {
 	opts.crypto = CHACHA20
 	opts.cryptoKey = "echo-e2e-shared-password"
 	opts.echoMode = true
+	opts.paddingMax = 32
 	p := startPair(t, opts)
 	defer p.Close()
 	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))

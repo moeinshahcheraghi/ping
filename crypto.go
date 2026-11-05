@@ -28,8 +28,9 @@ type CryptoConfig struct {
 	Cipher cipher.AEAD
 	// EchoMode must be configured before starting either endpoint. Both peers
 	// must enable it; authenticated domain separation prevents silent downgrade.
-	EchoMode bool
-	echoID   uint16 // per-packet copy: authenticate the client session routing ID
+	EchoMode   bool
+	paddingMax int    // configured before Run; encrypted protobuf extension
+	echoID     uint16 // per-packet copy: authenticate the client session routing ID
 }
 
 func (c *CryptoConfig) additionalData() []byte {
@@ -183,6 +184,13 @@ func (c *CryptoConfig) EncryptInto(dst []byte, data []byte) ([]byte, error) {
 
 // Decrypt decrypts the given data
 func (c *CryptoConfig) Decrypt(data []byte) ([]byte, error) {
+	return c.DecryptInto(nil, data)
+}
+
+// DecryptInto reuses receiver-owned plaintext storage. dst must not overlap
+// data: Echo Replies and replay hashes still need the original ciphertext.
+// Callers must finish decoding before reusing dst for the next packet.
+func (c *CryptoConfig) DecryptInto(dst, data []byte) ([]byte, error) {
 	if c.Mode == NoEncryption {
 		return data, nil
 	}
@@ -201,7 +209,7 @@ func (c *CryptoConfig) Decrypt(data []byte) ([]byte, error) {
 	ciphertext := data[nonceSize:]
 
 	// Decrypt the data
-	plaintext, err := c.Cipher.Open(nil, nonce, ciphertext, c.additionalData())
+	plaintext, err := c.Cipher.Open(dst[:0], nonce, ciphertext, c.additionalData())
 	if err != nil {
 		return nil, fmt.Errorf("decryption failed: %v", err)
 	}

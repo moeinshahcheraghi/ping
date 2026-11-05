@@ -196,6 +196,7 @@ type pairOpts struct {
 	crypto        EncryptionMode
 	cryptoKey     string
 	echoMode      bool
+	paddingMax    int
 	s5user        string
 	s5pass        string
 	timeout       int // per-conn inactivity timeout in seconds, both sides
@@ -256,6 +257,9 @@ func startPair(t testing.TB, opts pairOpts) *e2ePair {
 			t.Fatalf("NewCryptoConfig: %v", err)
 		}
 		cryptoCfg.EchoMode = opts.echoMode
+		if err := cryptoCfg.ConfigurePadding(opts.paddingMax); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	conntt := opts.conntt
@@ -283,6 +287,9 @@ func startPair(t testing.TB, opts pairOpts) *e2ePair {
 	}
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
+	}
+	if err := p.client.ConfigureTCP(opts.tcpBS, opts.tcpMW); err != nil {
+		t.Fatal(err)
 	}
 	if err := p.client.Run(); err != nil {
 		t.Fatalf("client Run: %v", err)

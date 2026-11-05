@@ -20,6 +20,8 @@ type echoRequestConn struct {
 	key      int
 	clientID int
 	sequence atomic.Uint32
+	// Fixed when the socket opens; restart after changing the host ping policy.
+	kernelReplies bool
 	// Only the single recvICMP goroutine accesses the bounded replay window.
 	received map[[32]byte]struct{}
 	ring     [echoReplayWindow][32]byte
@@ -34,7 +36,7 @@ func wrapEchoConn(conn icmpPacketConn, config *CryptoConfig, server bool, key, c
 	if config.Mode == NoEncryption || config.Cipher == nil {
 		return nil, errors.New("echo mode requires authenticated encryption")
 	}
-	if icmpDatagram {
+	if icmpDatagram.Load() {
 		return nil, errors.New("echo mode requires raw ICMP sockets; unprivileged datagram ICMP is unsupported")
 	}
 	var seed [2]byte
@@ -44,6 +46,7 @@ func wrapEchoConn(conn icmpPacketConn, config *CryptoConfig, server bool, key, c
 	c := &echoRequestConn{icmpPacketConn: conn, server: server, key: key, clientID: clientID,
 		received: make(map[[32]byte]struct{})}
 	c.sequence.Store(uint32(binary.BigEndian.Uint16(seed[:])))
+	c.kernelReplies = kernelEchoReplies(conn)
 	return c, nil
 }
 
@@ -52,7 +55,10 @@ func (c *echoRequestConn) WriteTo(packet []byte, dst net.Addr) (int, error) {
 		return 0, errors.New("truncated ICMP echo message")
 	}
 	// The caller may reuse its pooled packet immediately after WriteTo returns.
-	out := append([]byte(nil), packet...)
+	buf := getSendBuf(len(packet))
+	defer putSendBuf(buf)
+	out := (*buf)[:len(packet)]
+	copy(out, packet)
 	// Preserve the client session ID: independent clients can share a server
 	// and password. The encrypted envelope authenticates this routing field.
 	finalizeICMPEcho(out, SEND_PROTO, int(binary.BigEndian.Uint16(packet[4:6])), int(c.sequence.Add(1)))
@@ -85,11 +91,15 @@ func (c *echoRequestConn) accept(packet []byte, src net.Addr, msg *MyMsg) bool {
 	if !c.server && int(binary.BigEndian.Uint16(packet[4:6])) != c.clientID {
 		return false
 	}
-	reply := append([]byte(nil), packet...)
-	finalizeICMPEcho(reply, RECV_PROTO, int(binary.BigEndian.Uint16(packet[4:6])), int(binary.BigEndian.Uint16(packet[6:8])))
-	// Bypass WriteTo: replies must not be converted into fresh data requests.
-	// A failed acknowledgement must not prevent application-data delivery.
-	_, _ = c.icmpPacketConn.WriteTo(reply, src)
+	if !c.kernelReplies {
+		buf := getSendBuf(len(packet))
+		reply := (*buf)[:len(packet)]
+		copy(reply, packet)
+		finalizeICMPEcho(reply, RECV_PROTO, int(binary.BigEndian.Uint16(packet[4:6])), int(binary.BigEndian.Uint16(packet[6:8])))
+		// Bypass WriteTo: replies must retain the exact authenticated ciphertext.
+		_, _ = c.icmpPacketConn.WriteTo(reply, src)
+		putSendBuf(buf)
+	}
 	digest := sha256.Sum256(packet[8:])
 	if _, seen := c.received[digest]; seen {
 		return false

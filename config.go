@@ -8,27 +8,30 @@ import (
 
 // Config represents server or client configuration that can be loaded from a JSON file.
 type Config struct {
-	Type           string `json:"type,omitempty"`
-	Listen         string `json:"listen,omitempty"`
-	Target         string `json:"target,omitempty"`
-	Server         string `json:"server,omitempty"`
-	ICMPListen     string `json:"icmp_listen,omitempty"`
-	Timeout        int    `json:"timeout,omitempty"`
-	Password       string `json:"password,omitempty"`
-	Encrypt        string `json:"encrypt,omitempty"`
-	EchoMode       bool   `json:"echo_mode,omitempty"`
-	UDP            bool   `json:"udp,omitempty"`
-	Congestion     string `json:"congestion,omitempty"`
-	NoLog          bool   `json:"nolog,omitempty"`
-	Quiet          bool   `json:"quiet,omitempty"`
-	LogLevel       string `json:"loglevel,omitempty"`
-	Socks5         bool   `json:"socks5,omitempty"`
-	Sock5User      string `json:"s5user,omitempty"`
-	Sock5Pass      string `json:"s5pass,omitempty"`
-	MaxConn        int    `json:"maxconn,omitempty"`
-	Profile        int    `json:"profile,omitempty"`
-	ConnectTimeout int    `json:"conntt,omitempty"`
-	Forward        string `json:"forward,omitempty"`
+	Type            string `json:"type,omitempty"`
+	Listen          string `json:"listen,omitempty"`
+	Target          string `json:"target,omitempty"`
+	Server          string `json:"server,omitempty"`
+	ICMPListen      string `json:"icmp_listen,omitempty"`
+	Timeout         int    `json:"timeout,omitempty"`
+	Password        string `json:"password,omitempty"`
+	Encrypt         string `json:"encrypt,omitempty"`
+	PaddingMax      int    `json:"padding_max,omitempty"`
+	EchoMode        bool   `json:"echo_mode,omitempty"`
+	TCPBufferBytes  int    `json:"tcp_buffer_bytes,omitempty"`
+	TCPWindowFrames int    `json:"tcp_window_frames,omitempty"`
+	UDP             bool   `json:"udp,omitempty"`
+	Congestion      string `json:"congestion,omitempty"`
+	NoLog           bool   `json:"nolog,omitempty"`
+	Quiet           bool   `json:"quiet,omitempty"`
+	LogLevel        string `json:"loglevel,omitempty"`
+	Socks5          bool   `json:"socks5,omitempty"`
+	Sock5User       string `json:"s5user,omitempty"`
+	Sock5Pass       string `json:"s5pass,omitempty"`
+	MaxConn         int    `json:"maxconn,omitempty"`
+	Profile         int    `json:"profile,omitempty"`
+	ConnectTimeout  int    `json:"conntt,omitempty"`
+	Forward         string `json:"forward,omitempty"`
 }
 
 // legacyConfigFields maps config fields removed in v3 to migration hints.

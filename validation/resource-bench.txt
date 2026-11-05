@@ -1,8 +1,0 @@
-goos: linux
-goarch: amd64
-pkg: github.com/esrrhs/pingtunnel
-cpu: INTEL(R) XEON(R) PLATINUM 8573C
-BenchmarkTCPResourceAllocation/default-4         	     100	   1569401 ns/op	 3122134 B/op	      20 allocs/op
-BenchmarkTCPResourceAllocation/many_connections-4         	     100	    638491 ns/op	  553363 B/op	      20 allocs/op
-PASS
-ok  	github.com/esrrhs/pingtunnel	0.254s

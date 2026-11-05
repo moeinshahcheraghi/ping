@@ -90,6 +90,11 @@ Usage:
     -timeout    本地连接空闲超时时间，默认60s
                 Conn idle timeout, default 60s
 
+    -tcp-buffer-bytes   Per-connection TCP buffer size in bytes (0: 1048576).
+    -tcp-window-frames  Per-connection TCP in-flight window (0: 20000).
+    -padding-max        Encrypted length padding, 0..64 bytes (default: 0).
+                       For many connections, start with 262144 bytes / 512 frames.
+
     -password   共享密钥，认证+加密一体，必须两侧一致，最少8个字符 (必需)
                 Shared secret for authentication and encryption, must match on both sides, min 8 characters (required)
 
@@ -144,6 +149,9 @@ func run(args []string, injectedStop ...<-chan struct{}) int {
 	password := t.String("password", "", "shared secret for authentication and encryption (required, min 8 characters)")
 	encryption := t.String("encrypt", "", "encryption algorithm override: chacha20 (default), aes256, aes128")
 	echoMode := t.Bool("echo-mode", false, "use authenticated bidirectional Echo Requests and exact Echo Replies; enable on both peers")
+	paddingMax := t.Int("padding-max", 0, "encrypted length padding: 0 disables, maximum 64 bytes")
+	tcpBufferBytes := t.Int("tcp-buffer-bytes", 0, "per-connection TCP buffer bytes (0: default 1048576)")
+	tcpWindowFrames := t.Int("tcp-window-frames", 0, "per-connection TCP window frames (0: default 20000)")
 	udp := t.Bool("udp", false, "forward in udp mode (default is tcp)")
 	nolog := t.Bool("nolog", false, "write log file")
 	quiet := t.Bool("quiet", false, "do not print stdout")
@@ -235,8 +243,17 @@ func run(args []string, injectedStop ...<-chan struct{}) int {
 		if !setFlags["encrypt"] && cfg.Encrypt != "" {
 			*encryption = cfg.Encrypt
 		}
+		if !setFlags["padding-max"] {
+			*paddingMax = cfg.PaddingMax
+		}
 		if !setFlags["echo-mode"] {
 			*echoMode = cfg.EchoMode
+		}
+		if !setFlags["tcp-buffer-bytes"] {
+			*tcpBufferBytes = cfg.TCPBufferBytes
+		}
+		if !setFlags["tcp-window-frames"] {
+			*tcpWindowFrames = cfg.TCPWindowFrames
 		}
 		if !setFlags["udp"] && cfg.UDP {
 			*udp = true
@@ -319,6 +336,10 @@ func run(args []string, injectedStop ...<-chan struct{}) int {
 		return 0
 	}
 	cryptoConfig.EchoMode = *echoMode
+	if err := cryptoConfig.ConfigurePadding(*paddingMax); err != nil {
+		fmt.Printf("%s\n", err)
+		return 2
+	}
 
 	if *nolog && *quiet {
 		fmt.Fprintln(os.Stderr, "Warning: both -nolog and -quiet are set, no log output will be generated.")
@@ -373,6 +394,10 @@ func run(args []string, injectedStop ...<-chan struct{}) int {
 		if err != nil {
 			loggo.Error("ERROR: %s", err.Error())
 			return 0
+		}
+		if err := c.ConfigureTCP(*tcpBufferBytes, *tcpWindowFrames); err != nil {
+			fmt.Printf("%s\n", err)
+			return 2
 		}
 		loggo.Info("Client Listen %s (%s) Server %s (%s) TargetPort %s ICMP Listen %s", c.Addr(), c.IPAddr(),
 			c.ServerAddr(), c.ServerIPAddr(), c.TargetAddr(), c.ICMPAddr())

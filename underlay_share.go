@@ -1,7 +1,7 @@
 package pingtunnel
 
 import (
-	"container/list"
+	"runtime"
 	"sync"
 
 	"github.com/esrrhs/gohome/network"
@@ -53,6 +53,7 @@ func (s *underlayShare) unlock() {
 		return
 	}
 	ch := s.queue[0]
+	s.queue[0] = nil
 	s.queue = s.queue[1:]
 	s.mu.Unlock()
 	// Handoff: held stays true, the waiter proceeds without re-checking.
@@ -62,30 +63,36 @@ func (s *underlayShare) unlock() {
 // emitFrames sends frames the congestion controller already admitted, in
 // quanta, releasing the underlay between quanta. send returns the bytes
 // just written (0 if the frame was skipped).
-func (s *underlayShare) emitFrames(frames *list.List, send func(*network.Frame) int) {
-	if frames == nil || frames.Len() == 0 || send == nil {
+func (s *underlayShare) emitFrames(frames []*network.Frame, send func(*network.Frame) int) {
+	if len(frames) == 0 || send == nil {
 		return
 	}
 	if s == nil {
-		for e := frames.Front(); e != nil; e = e.Next() {
-			send(e.Value.(*network.Frame))
+		for _, f := range frames {
+			send(f)
 		}
 		return
 	}
-	e := frames.Front()
-	for e != nil {
+	i := 0
+	for i < len(frames) {
 		s.lock()
 		func() {
 			defer s.unlock()
 			budget := underlayShareQuantum
-			for e != nil && budget > 0 {
-				n := send(e.Value.(*network.Frame))
+			for i < len(frames) && budget > 0 {
+				n := send(frames[i])
 				if n < 1 {
 					n = 1
 				}
 				budget -= n
-				e = e.Next()
+				i++
 			}
 		}()
+		// Also yield when no other sender is waiting: the receive pump still
+		// needs CPU to drain ACKs and prevent one bulk window from bursting
+		// into a full raw-socket queue. This adds no fixed pacing delay.
+		if i < len(frames) {
+			runtime.Gosched()
+		}
 	}
 }

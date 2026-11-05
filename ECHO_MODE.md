@@ -10,7 +10,8 @@ domain, with no automatic fallback. All peers still need the same strong passwor
 * Client and server carry encrypted application frames only in type-8, code-0
   Echo Requests. Each endpoint advances its own sequence counter.
 * After validating the ICMP checksum, AEAD, message magic, auth code and direction,
-  the receiver returns a type-0, code-0 Echo Reply with the exact request payload,
+  the application (or the native Linux kernel responder) returns a type-0,
+  code-0 Echo Reply with the exact request payload,
   identifier and sequence. Replies are acknowledgements, never new application data.
 * The client session identifier is authenticated with the encrypted message and
   preserved for independent clients sharing a server. Reflected opposite-direction
@@ -29,19 +30,19 @@ work through a path that permits only client-originated Echo Requests and their
 matching replies. NAT and firewalls may treat server-originated requests
 differently; verify the actual path before switching an existing service.
 
-Linux normally generates its own Echo Replies in addition to the replies generated
-here. To obtain a single exact reply per request, the operator must suppress those
-kernel replies on **both** dedicated tunnel hosts or in their dedicated network
-namespaces. For example, record the existing value before using:
+On Linux, native raw sockets now inspect the namespace's
+`net.ipv4.icmp_echo_ignore_all` setting when they open. With the normal value
+`0`, the kernel sends exact Echo Replies and the application avoids a second
+reply. Ordinary ping remains available. With value `1`, the application replies
+only to authenticated tunnel requests and logs that ordinary ping is disabled.
+Other platforms retain application replies. Restart the tunnel after changing
+this host setting; it is intentionally not monitored on every packet.
 
-```sh
-sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
-```
-
-This affects normal ping responses on that host/namespace. The application does
-not change this global setting or firewall rules automatically. Restore the
-previous value when disabling the tunnel. Leaving kernel replies enabled does
-not carry application data through them, but can expose duplicate replies.
+The application does not modify sysctls or firewall rules. Do not disable normal
+kernel Echo replies merely to run this version. If an older setup changed that
+setting, restore the intended host policy yourself before restarting the tunnel.
+Kernel replies to arbitrary ping payloads are normal host behavior and do not
+mean that those payloads passed tunnel authentication.
 
 ## OpenVPN TCP/2083 example
 
@@ -94,9 +95,8 @@ duplicate delivery, sequence wrapping, bounded replay state, and end-to-end
 TCP/UDP/SOCKS forwarding. Real-ICMP tests must report their underlay explicitly;
 the unprivileged harness can otherwise use its in-process UDP transport.
 
-Build with the Go version pinned in `go.mod`. The repository also provides a
-ready Linux amd64 binary named `pingtunnel`; the command below builds a separate
-`pingtunnel-echo` executable from source:
+Build with the Go version pinned in `go.mod`. Build the
+current source with:
 
 ```sh
 go build -mod=readonly -trimpath -o pingtunnel-echo ./cmd
@@ -118,3 +118,24 @@ unshare --user --map-root-user --net sh -c '
     -test.v -test.timeout=3m
 '
 ```
+
+## Idle connections and resource use
+
+This module supports the capacity and padding settings.
+For many connections use the capacity sample configs; the historical default
+1 MiB / 20000-frame profile is retained for compatibility and can exceed an
+8 GiB server's budget at thousands of connections.
+
+Idle FrameMgr PING/HB generation uses a five-second interval varied by ±10%
+after five seconds without payload. Active flows keep one-second control probes.
+Payload, ACK, retransmission and close processing are not held until a keepalive.
+The adapted frame manager lives in `internal/reliable/` with its upstream tests
+and MIT attribution; protobuf types and framing remain compatible.
+
+Linux requests 4 MiB read/write socket buffers once per shared ICMP socket.
+Kernel limits can clamp those requests. No global network setting is changed.
+Receiver plaintext scratch storage and send-frame slices are reused while exact
+Echo replies retain the original authenticated ciphertext.
+
+These changes reduce avoidable CPU work, control traffic and duplicate replies.
+They do not make high-rate bidirectional ICMP indistinguishable from ordinary ping.
